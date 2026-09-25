@@ -33,6 +33,7 @@ jobs:
           mkdir -p "$taps"
           rm -rf "$taps/homebrew-tap"
           ln -s "$GITHUB_WORKSPACE" "$taps/homebrew-tap"
+          brew trust wdremington/tap
 
       - name: Style
         run: brew style wdremington/tap
