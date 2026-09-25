@@ -1,0 +1,103 @@
+name: Autobump
+
+# Opens a PR when claude-token-counter publishes a release newer than the cask.
+# Runs inside the tap, so it needs no token with access to any other repo.
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autobump
+
+jobs:
+  bump:
+    name: Bump tokencounter
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write        # push the bump branch
+      pull-requests: write   # open the PR
+      actions: write         # dispatch CI on the bump branch
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_REPO: wdremington/claude-token-counter
+      CASK: Casks/tokencounter.rb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compare latest release with the cask
+        id: check
+        run: |
+          set -euo pipefail
+          tag="$(gh release view --repo "$SOURCE_REPO" --json tagName --jq .tagName)"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Latest release tag '$tag' is not vX.Y.Z"; exit 1
+          fi
+          latest="${tag#v}"
+          current="$(sed -n 's/^  version "\([^"]*\)"$/\1/p' "$CASK")"
+          echo "cask: $current, latest release: $latest"
+
+          newest="$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)"
+          if [[ "$latest" == "$current" || "$newest" != "$latest" ]]; then
+            echo "Up to date."; echo "bump=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          branch="bump/tokencounter-$latest"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "Branch $branch already exists; a bump PR is pending."
+            echo "bump=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          echo "bump=true" >> "$GITHUB_OUTPUT"
+          echo "version=$latest" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Download and verify the DMG
+        if: steps.check.outputs.bump == 'true'
+        id: dmg
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          asset="TokenCounter-$VERSION.dmg"
+          url="https://github.com/$SOURCE_REPO/releases/download/v$VERSION/$asset"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$asset" "$url"
+          sha="$(sha256sum "$RUNNER_TEMP/$asset" | cut -d' ' -f1)"
+
+          # Cross-check against the digest GitHub recorded at upload.
+          recorded="$(gh release view "v$VERSION" --repo "$SOURCE_REPO" --json assets \
+            --jq ".assets[] | select(.name == \"$asset\") | .digest")"
+          if [[ "$recorded" != "sha256:$sha" ]]; then
+            echo "::error::sha256 mismatch: downloaded $sha, release records '$recorded'"; exit 1
+          fi
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Update cask and open PR
+        if: steps.check.outputs.bump == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+          BRANCH: ${{ steps.check.outputs.branch }}
+          SHA256: ${{ steps.dmg.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          sed -i -E "s/^  version \"[^\"]*\"$/  version \"$VERSION\"/" "$CASK"
+          sed -i -E "s/^  sha256 \"[0-9a-f]{64}\"$/  sha256 \"$SHA256\"/" "$CASK"
+          grep -q "version \"$VERSION\"" "$CASK" && grep -q "sha256 \"$SHA256\"" "$CASK"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git commit -am "chore(tokencounter): bump to $VERSION"
+          git push origin "$BRANCH"
+
+          gh pr create --base main --head "$BRANCH" \
+            --title "chore(tokencounter): bump to $VERSION" \
+            --body "Automated bump to [v$VERSION](https://github.com/$SOURCE_REPO/releases/tag/v$VERSION).
+
+          sha256 \`$SHA256\` was computed from the downloaded DMG and matches the digest GitHub recorded for the release asset. CI (style, audit, install, Gatekeeper check) is dispatched on this branch."
+
+          gh workflow run ci.yml --ref "$BRANCH"

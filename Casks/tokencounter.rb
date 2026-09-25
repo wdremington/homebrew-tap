@@ -28,7 +28,7 @@ cask "tokencounter" do
 
   # The app targets macOS 14. Declaring it means an older system gets a clear
   # message from brew instead of a bundle that silently fails to launch.
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "TokenCounter.app"
 
@@ -37,8 +37,8 @@ cask "tokencounter" do
   # is removed only by an explicit zap, never by a plain uninstall.
   zap trash: [
     "~/Library/Application Support/TokenCounter",
-    "~/Library/Preferences/com.tokencounter.app.plist",
     "~/Library/Caches/com.tokencounter.app",
+    "~/Library/Preferences/com.tokencounter.app.plist",
     "~/Library/Saved Application State/com.tokencounter.app.savedState",
   ]
 end
