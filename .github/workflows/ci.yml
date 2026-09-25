@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # Dispatched by autobump.yml: a PR opened with GITHUB_TOKEN does not trigger
+  # pull_request workflows, so the bump branch is checked this way instead.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cask:
+    name: Cask checks
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      # `brew audit --online` calls the GitHub API; unauthenticated runners share
+      # a 60/hour limit and routinely exhaust it.
+      HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Homebrew is preinstalled on GitHub's macOS runners. Linking the checkout
+      # in as the tap tests exactly this revision without a third-party action.
+      - name: Link checkout as the tap
+        run: |
+          taps="$(brew --repository)/Library/Taps/wdremington"
+          mkdir -p "$taps"
+          rm -rf "$taps/homebrew-tap"
+          ln -s "$GITHUB_WORKSPACE" "$taps/homebrew-tap"
+          brew trust wdremington/tap
+
+      - name: Style
+        run: brew style wdremington/tap
+
+      - name: Audit
+        run: brew audit --cask --strict --online wdremington/tap/tokencounter
+
+      - name: Install
+        run: |
+          brew install --cask wdremington/tap/tokencounter
+          test -d /Applications/TokenCounter.app
+          codesign --verify --deep --strict /Applications/TokenCounter.app
+          spctl --assess --type execute -vv /Applications/TokenCounter.app
+
+      - name: Uninstall
+        run: |
+          brew uninstall --cask --zap wdremington/tap/tokencounter
+          test ! -e /Applications/TokenCounter.app
